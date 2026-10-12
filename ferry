@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""ferry: move files between this Mac and a home server.
+
+Transport is rsync over SSH with the key you already use, so there is no new
+port, daemon, or password.
+"""
+import argparse
+import os
+import posixpath
+import shlex
+import subprocess
+import sys
+import time
+
+HOST = os.environ.get("FERRY_HOST", "homelab")
+# Remote relative paths resolve here; ssh starts in the remote home directory.
+EXCHANGE = "Ferry"
+SSH = [
+    "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+    "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
+]
+RSYNC = [
+    "rsync", "-a", "--exclude=.DS_Store", "-e", " ".join(SSH),
+]
+
+
+def die(msg):
+    print("ferry: " + msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def remote_path(p):
+    if p == "~":
+        return "."
+    if p.startswith("~/"):
+        return p[2:]
+    if p.startswith("/"):
+        return p
+    return posixpath.normpath(posixpath.join(EXCHANGE, p))
+
+
+def display(rpath):
+    return "%s:%s" % (HOST, rpath if rpath.startswith("/") else "~/" + rpath)
+
+
+def ssh(command, check=True):
+    proc = subprocess.run(SSH + [HOST, command], stdout=subprocess.PIPE, universal_newlines=True)
+    if check and proc.returncode != 0:
+        die("ssh %s failed (exit %d)" % (HOST, proc.returncode))
+    return proc
+
+
+def rsync(sources, dest):
+    cmd = RSYNC + (["--progress"] if sys.stdout.isatty() else [])
+    rc = subprocess.call(cmd + sources + [dest])
+    if rc != 0:
+        die("rsync exited %d" % rc)
+
+
+def local_bytes(paths):
+    total = 0
+    for top in paths:
+        if os.path.isfile(top):
+            total += os.path.getsize(top)
+        for root, _, files in os.walk(top):
+            total += sum(os.lstat(os.path.join(root, f)).st_size for f in files)
+    return total
+
+
+def summary(verb, nbytes, seconds, landed):
+    mb = nbytes / 1e6
+    print("ferry: %s %.1f MB in %.1fs (%.1f MB/s)" % (verb, mb, seconds, mb / max(seconds, 0.001)))
+    for path in landed:
+        print("  " + path)
+
+
+def send(args):
+    sources = [os.path.abspath(p) for p in args.paths]
+    missing = [p for p in sources if not os.path.lexists(p)]
+    if missing:
+        die("no such file: " + ", ".join(missing))
+    rdir = remote_path(args.to or "")
+    ssh("mkdir -p -- %s" % shlex.quote(rdir))
+    started = time.time()
+    rsync(sources, "%s:%s" % (HOST, shlex.quote(rdir + "/")))
+    landed = [display(posixpath.join(rdir, os.path.basename(s))) for s in sources]
+    summary("sent", local_bytes(sources), time.time() - started, landed)
+
+
+def get(args):
+    rsources = [remote_path(p) for p in args.paths]
+    for p in rsources:
+        if posixpath.basename(p) in ("", ".", ".."):
+            die("name a file or folder, not %r" % p)
+    ldir = os.path.abspath(os.path.expanduser(args.to or "."))
+    os.makedirs(ldir, exist_ok=True)
+    started = time.time()
+    rsync(["%s:%s" % (HOST, shlex.quote(p)) for p in rsources], ldir + "/")
+    landed = [os.path.join(ldir, posixpath.basename(p)) for p in rsources]
+    summary("received", local_bytes(landed), time.time() - started, landed)
+
+
+def ls(args):
+    rpath = remote_path(args.path or "")
+    setup = "mkdir -p %s && " % EXCHANGE if rpath == EXCHANGE else ""
+    proc = ssh(setup + "ls -lhA -- %s" % shlex.quote(rpath), check=False)
+    print(proc.stdout, end="")
+    sys.exit(proc.returncode)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="ferry",
+        description="Move files to and from %s. Remote relative paths are under ~/%s; "
+        "use ~/... or /... for anywhere else." % (HOST, EXCHANGE),
+    )
+    sub = parser.add_subparsers(dest="cmd", metavar="{send,get,ls}")
+    sub.required = True
+    p = sub.add_parser("send", help="copy local files or folders to the homelab")
+    p.add_argument("paths", nargs="+")
+    p.add_argument("-t", "--to", help="remote folder (default ~/%s)" % EXCHANGE)
+    p.set_defaults(func=send)
+    p = sub.add_parser("get", help="copy remote files or folders here")
+    p.add_argument("paths", nargs="+")
+    p.add_argument("-t", "--to", help="local folder (default: current directory)")
+    p.set_defaults(func=get)
+    p = sub.add_parser("ls", help="list a remote folder (default ~/%s)" % EXCHANGE)
+    p.add_argument("path", nargs="?")
+    p.set_defaults(func=ls)
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
