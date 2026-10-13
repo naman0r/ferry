@@ -22,8 +22,13 @@ SSH = [
     "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
 ]
 RSYNC = [
-    "rsync", "-a", "--exclude=.DS_Store", "-e", " ".join(SSH),
+    "rsync", "-a", "--timeout=60", "--exclude=.DS_Store",
+    # Interrupted files wait in a hidden dir and are resumed next run, so a
+    # half-written file never appears under its real name.
+    "--partial", "--partial-dir=.ferry-partial",
+    "-e", " ".join(SSH),
 ]
+ATTEMPTS = 4
 
 
 def manifest(paths):
@@ -49,6 +54,7 @@ def manifest(paths):
         entries = {".": digest(top)}
         if os.path.isdir(top) and not os.path.islink(top):
             for root, dirs, files in os.walk(top):
+                dirs[:] = [d for d in dirs if d != ".ferry-partial"]
                 for name in dirs + files:
                     if name != ".DS_Store":
                         full = os.path.join(root, name)
@@ -91,9 +97,15 @@ def remote_manifest(paths):
 
 def rsync(sources, dest, checksum=False):
     cmd = RSYNC + (["--checksum"] if checksum else []) + (["--progress"] if sys.stdout.isatty() else [])
-    rc = subprocess.call(cmd + sources + [dest])
-    if rc != 0:
-        die("rsync exited %d" % rc)
+    for attempt in range(1, ATTEMPTS + 1):
+        rc = subprocess.call(cmd + sources + [dest])
+        if rc == 0:
+            return
+        if attempt < ATTEMPTS:
+            wait = 2 ** attempt
+            print("ferry: rsync exited %d, resuming in %ds (attempt %d/%d)" % (rc, wait, attempt + 1, ATTEMPTS), file=sys.stderr)
+            time.sleep(wait)
+    die("rsync failed %d times; rerun the same command to resume" % ATTEMPTS)
 
 
 def mismatches(expected, actual):
@@ -198,7 +210,10 @@ def main():
     p.add_argument("path", nargs="?")
     p.set_defaults(func=ls)
     args = parser.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        die("interrupted; rerun the same command to resume")
 
 
 if __name__ == "__main__":
