@@ -96,7 +96,8 @@ def remote_manifest(paths):
 
 
 def rsync(sources, dest, checksum=False):
-    cmd = RSYNC + (["--checksum"] if checksum else []) + (["--progress"] if sys.stdout.isatty() else [])
+    # caffeinate: an idle laptop drops into maintenance sleep and stalls the link.
+    cmd = ["caffeinate", "-i"] + RSYNC + (["--checksum"] if checksum else []) + (["--progress"] if sys.stdout.isatty() else [])
     for attempt in range(1, ATTEMPTS + 1):
         rc = subprocess.call(cmd + sources + [dest])
         if rc == 0:
