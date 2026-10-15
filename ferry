@@ -120,6 +120,8 @@ def mismatches(expected, actual):
 def transfer(sources, dest, pairs, source_manifest, dest_manifest):
     """pairs maps each source manifest key to where it lands in the dest manifest."""
     expected = {pairs[k]: v for k, v in source_manifest.items()}
+    if len(expected) < len(pairs):
+        die("two items share a name and would overwrite each other; send them separately")
     started = time.time()
     rsync(sources, dest)
     bad = mismatches(expected, dest_manifest(list(expected)))
